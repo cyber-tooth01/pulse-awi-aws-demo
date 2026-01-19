@@ -1,0 +1,72 @@
+{
+  "dashboard": {
+    "title": "PulseAQI - Live Air Quality Monitor",
+    "uid": "pulseaqi-live",
+    "timezone": "browser",
+    "refresh": "10s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Current AQI by Node",
+        "type": "stat",
+        "gridPos": {"x": 0, "y": 0, "w": 24, "h": 6},
+        "targets": [{
+          "datasource": "AWS Timestream - PulseAQI",
+          "queryType": "timestream",
+          "rawQuery": "SELECT node_id, MAX(measure_value::double) as aqi FROM \"pulseaqi_demo\".\"sensor_data\" WHERE measure_name = 'value' AND dimension_metric = 'aqi' AND time > ago(2m) GROUP BY node_id"
+        }],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 51, "color": "yellow"},
+                {"value": 101, "color": "orange"},
+                {"value": 151, "color": "red"}
+              ]
+            },
+            "unit": "none"
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "PM2.5 Levels (Last 24 Hours)",
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8},
+        "targets": [{
+          "datasource": "AWS Timestream - PulseAQI",
+          "queryType": "timestream",
+          "rawQuery": "SELECT time, node_id, measure_value::double as pm25 FROM \"pulseaqi_demo\".\"sensor_data\" WHERE measure_name = 'value' AND dimension_metric = 'pm25' AND time > ago(24h) ORDER BY time DESC"
+        }]
+      },
+      {
+        "id": 3,
+        "title": "AQI Trend",
+        "type": "timeseries",
+        "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8},
+        "targets": [{
+          "datasource": "AWS Timestream - PulseAQI",
+          "queryType": "timestream",
+          "rawQuery": "SELECT time, node_id, measure_value::double as aqi FROM \"pulseaqi_demo\".\"sensor_data\" WHERE measure_name = 'value' AND dimension_metric = 'aqi' AND time > ago(24h) ORDER BY time DESC"
+        }]
+      },
+      {
+        "id": 4,
+        "title": "All Pollutants - Latest Reading",
+        "type": "table",
+        "gridPos": {"x": 0, "y": 14, "w": 24, "h": 8},
+        "targets": [{
+          "datasource": "AWS Timestream - PulseAQI",
+          "queryType": "timestream",
+          "rawQuery": "SELECT node_id, MAX(CASE WHEN dimension_metric = 'pm25' THEN measure_value::double END) as PM2_5, MAX(CASE WHEN dimension_metric = 'pm10' THEN measure_value::double END) as PM10, MAX(CASE WHEN dimension_metric = 'voc' THEN measure_value::double END) as VOC, MAX(CASE WHEN dimension_metric = 'nox' THEN measure_value::double END) as NOx, MAX(CASE WHEN dimension_metric = 'temp' THEN measure_value::double END) as Temp_C, MAX(CASE WHEN dimension_metric = 'humidity' THEN measure_value::double END) as Humidity_Pct, MAX(CASE WHEN dimension_metric = 'aqi' THEN measure_value::double END) as AQI FROM \"pulseaqi_demo\".\"sensor_data\" WHERE time > ago(2m) GROUP BY node_id"
+        }]
+      }
+    ]
+  }
+}
