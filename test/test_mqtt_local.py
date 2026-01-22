@@ -7,6 +7,10 @@ Run this to verify your MQTT topic is receiving sensor data before deploying to 
 import paho.mqtt.client as mqtt
 import json
 import sys
+import os
+import base64
+import hashlib
+from Crypto.Cipher import AES
 
 try:
     from meshtastic.protobuf import mqtt_pb2, portnums_pb2, telemetry_pb2
@@ -20,6 +24,34 @@ MQTT_PORT = 1883
 MQTT_TOPIC = "msh/US/2/e/pulse-aqi/#"
 MQTT_USERNAME = "meshdev"
 MQTT_PASSWORD = "large4cats"
+
+# Meshtastic encryption PSK (base64-encoded)
+MESHTASTIC_PSK_B64 = os.environ.get('MESHTASTIC_PSK', 'Sw==')
+try:
+    MESHTASTIC_PSK = base64.b64decode(MESHTASTIC_PSK_B64)
+except Exception as e:
+    print(f"⚠ Failed to decode PSK: {e}")
+    MESHTASTIC_PSK = base64.b64decode('Sw==')
+
+def decrypt_payload(encrypted_bytes, psk):
+    """Decrypt Meshtastic AES-128-CTR encrypted payload.
+
+    Meshtastic derives a 128-bit key from the PSK using SHA256 (first 16 bytes).
+    The nonce is the first 4 bytes of the payload; remaining bytes are ciphertext.
+    IV for CTR = nonce (4B) + 12 zero bytes.
+    """
+    try:
+        if len(encrypted_bytes) < 4:
+            return None
+        nonce = encrypted_bytes[:4]
+        ciphertext = encrypted_bytes[4:]
+        iv = nonce + b'\x00' * 12
+        key = hashlib.sha256(psk).digest()[:16]
+        cipher = AES.new(key, AES.MODE_CTR, nonce=iv[:12])
+        return cipher.decrypt(ciphertext)
+    except Exception as e:
+        print(f"   Decryption error: {e}")
+        return None
 
 def on_connect(client, userdata, flags, rc):
     """MQTT connection callback"""
@@ -64,17 +96,41 @@ def on_message(client, userdata, msg):
                 # Decode Meshtastic ServiceEnvelope
                 envelope = mqtt_pb2.ServiceEnvelope()
                 envelope.ParseFromString(msg.payload)
-                
-                sender_id = f"!{envelope.packet.from_:08x}" if envelope.packet.from_ else "unknown"
+
+                # Support both 'from_' and 'from' attributes
+                from_id = getattr(envelope.packet, 'from_', None)
+                if not from_id:
+                    from_id = getattr(envelope.packet, 'from', None)
+                sender_id = f"!{from_id:08x}" if from_id else "unknown"
                 print(f"   Sender: {sender_id}")
-                print(f"   Port: {envelope.packet.decoded.portnum}")
                 
-                # Check if it's a TEXT_MESSAGE_APP
-                if envelope.packet.decoded.portnum == portnums_pb2.PortNum.TEXT_MESSAGE_APP:
-                    text_payload = envelope.packet.decoded.payload.decode('utf-8')
-                    print(f"   Text payload: {text_payload[:100]}..." if len(text_payload) > 100 else f"   Text payload: {text_payload}")
-                    
-                    # Try to parse as JSON sensor data
+                # Get port number (may not be accessible for encrypted messages)
+                port = getattr(envelope.packet.decoded, 'portnum', 0)
+                if port:
+                    print(f"   Port: {port}")
+
+                # Check if encrypted and decrypt if needed
+                payload_bytes = envelope.packet.decoded.payload
+                text_payload = None
+                is_encrypted = getattr(envelope.packet.decoded, 'encrypted', False)
+                
+                # If port is 0, assume encrypted even if flag not set
+                if is_encrypted or port == 0:
+                    print(f"   🔒 Encrypted payload - attempting decryption...")
+                    print(f"   PSK length: {len(MESHTASTIC_PSK)} bytes")
+                    decrypted = decrypt_payload(bytes(payload_bytes), MESHTASTIC_PSK)
+                    if decrypted:
+                        text_payload = decrypted.decode('utf-8', errors='ignore')
+                        print(f"   ✓ Decryption successful (decrypted {len(decrypted)} bytes)")
+                    else:
+                        print(f"   ✗ Decryption failed")
+                else:
+                    text_payload = payload_bytes.decode('utf-8', errors='ignore')
+
+                if text_payload:
+                    preview = (text_payload[:100] + '...') if len(text_payload) > 100 else text_payload
+                    print(f"   Text payload: {preview}")
+
                     if text_payload.strip().startswith('{'):
                         try:
                             sensor_data = json.loads(text_payload)
@@ -88,8 +144,8 @@ def on_message(client, userdata, msg):
                         except json.JSONDecodeError as e:
                             print(f"   ⚠ Text looks like JSON but failed to parse: {e}")
                 else:
-                    print(f"   ⚠ Not a text message (port {envelope.packet.decoded.portnum})")
-                    
+                    print("   ⚠ No text payload present in protobuf message")
+
             except Exception as e:
                 print(f"   ✗ Protobuf decode error: {e}")
                 print(f"   Hex dump (first 64 bytes): {msg.payload[:64].hex()}")

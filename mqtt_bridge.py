@@ -1,17 +1,31 @@
 #!/usr/bin/env python3
 """
-PulseAQI MQTT to Timestream Bridge
-Subscribes to Meshtastic MQTT, parses sensor data, writes to AWS Timestream
+PulseAQI MQTT to InfluxDB Bridge
+Subscribes to Meshtastic MQTT, parses sensor data, writes to InfluxDB Serverless
 """
 
 import json
-import boto3
 import paho.mqtt.client as mqtt
 from datetime import datetime
 import logging
 import sys
 import time
+import os
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
 
+# Setup logging first (before any usage)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('/var/log/pulseaqi-mqtt.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Try importing Meshtastic protobuf support (optional)
 try:
     from meshtastic.protobuf import mqtt_pb2, portnums_pb2
     PROTOBUF_AVAILABLE = True
@@ -26,23 +40,19 @@ MQTT_TOPIC = "msh/US/2/e/pulse-aqi/#"
 MQTT_USERNAME = "meshdev"
 MQTT_PASSWORD = "large4cats"
 
-AWS_REGION = "us-east-1"
-DATABASE_NAME = "pulseaqi_demo"
-TABLE_NAME = "sensor_data"
+# InfluxDB Configuration (set via environment variables)
+INFLUXDB_URL = os.environ.get('INFLUXDB_URL', 'https://us-east-1-1.aws.cloud2.influxdata.com')
+INFLUXDB_TOKEN = os.environ.get('INFLUXDB_TOKEN')  # Required
+INFLUXDB_ORG = os.environ.get('INFLUXDB_ORG')  # Required
+INFLUXDB_BUCKET = os.environ.get('INFLUXDB_BUCKET', 'pulseaqi')
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('/var/log/pulseaqi-mqtt.log')
-    ]
-)
-logger = logging.getLogger(__name__)
+if not INFLUXDB_TOKEN or not INFLUXDB_ORG:
+    logger.error("INFLUXDB_TOKEN and INFLUXDB_ORG environment variables must be set")
+    sys.exit(1)
 
-# Initialize Timestream client
-timestream = boto3.client('timestream-write', region_name=AWS_REGION)
+# Initialize InfluxDB client
+influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
+write_api = influx_client.write_api(write_options=SYNCHRONOUS)
 
 def calculate_aqi_pm25(pm25):
     """
@@ -77,34 +87,31 @@ def get_aqi_category(aqi):
     else:
         return "Hazardous"
 
-def make_timestream_record(node_id, metric_name, value, timestamp):
-    """Create a Timestream record"""
-    return {
-        'Dimensions': [
-            {'Name': 'node_id', 'Value': node_id},
-            {'Name': 'metric', 'Value': metric_name}
-        ],
-        'MeasureName': 'value',
-        'MeasureValue': str(value),
-        'MeasureValueType': 'DOUBLE',
-        'Time': timestamp
-    }
+def make_influx_point(node_id, timestamp_ms, sensor_data, aqi, category):
+    """Create an InfluxDB Point with all sensor metrics"""
+    point = Point("air_quality") \
+        .tag("node_id", node_id) \
+        .tag("aqi_category", category) \
+        .field("pm1", float(sensor_data['pm1'])) \
+        .field("pm25", float(sensor_data['pm25'])) \
+        .field("pm4", float(sensor_data['pm4'])) \
+        .field("pm10", float(sensor_data['pm10'])) \
+        .field("voc", float(sensor_data['voc'])) \
+        .field("nox", float(sensor_data['nox'])) \
+        .field("temperature", float(sensor_data['t'])) \
+        .field("humidity", float(sensor_data['rh'])) \
+        .field("aqi", aqi) \
+        .time(timestamp_ms * 1_000_000)  # Convert ms to nanoseconds
+    return point
 
-def write_to_timestream(records):
-    """Write records to Timestream with retry logic"""
+def write_to_influxdb(point):
+    """Write point to InfluxDB with retry logic"""
     try:
-        result = timestream.write_records(
-            DatabaseName=DATABASE_NAME,
-            TableName=TABLE_NAME,
-            Records=records
-        )
-        logger.info(f"✓ Wrote {len(records)} records to Timestream")
+        write_api.write(bucket=INFLUXDB_BUCKET, record=point)
+        logger.info(f"✓ Wrote sensor data to InfluxDB")
         return True
-    except timestream.exceptions.RejectedRecordsException as e:
-        logger.error(f"Some records rejected: {e}")
-        return False
     except Exception as e:
-        logger.error(f"Error writing to Timestream: {e}")
+        logger.error(f"Error writing to InfluxDB: {e}")
         return False
 
 def on_connect(client, userdata, flags, rc):
@@ -120,6 +127,50 @@ def on_disconnect(client, userdata, rc):
     """MQTT disconnection callback"""
     if rc != 0:
         logger.warning(f"Unexpected disconnect. Will attempt reconnect...")
+
+def _get_node_id_from_packet(packet):
+    """Return Meshtastic node id string from a protobuf packet, handling field name variants."""
+    fid = None
+    try:
+        # Some protobuf builds expose 'from_' while others use 'from'
+        if hasattr(packet, 'from_') and packet.from_:
+            fid = packet.from_
+        elif hasattr(packet, 'from') and getattr(packet, 'from'):
+            fid = getattr(packet, 'from')
+    except Exception:
+        fid = None
+    return f"!{fid:08x}" if fid else None
+
+
+def _decrypt_payload(encrypted_bytes, psk):
+    """
+    Decrypt Meshtastic encrypted payload using AES-128-CTR with PSK as key.
+    Returns decrypted bytes or None on failure.
+    """
+    try:
+        # Meshtastic uses first 4 bytes as nonce, rest as ciphertext
+        if len(encrypted_bytes) < 4:
+            logger.debug("Encrypted payload too short")
+            return None
+        
+        nonce = encrypted_bytes[:4]
+        ciphertext = encrypted_bytes[4:]
+        
+        # Construct 16-byte IV: nonce (4 bytes) + zeros (12 bytes)
+        iv = nonce + b'\x00' * 12
+        
+        # Pad PSK to 16 bytes if needed
+        key = psk if len(psk) >= 16 else psk + b'\x00' * (16 - len(psk))
+        
+        cipher = AES.new(key[:16], AES.MODE_CTR, nonce=iv[:12])
+        plaintext = cipher.decrypt(ciphertext)
+        
+        logger.debug(f"Decrypted {len(ciphertext)} bytes → {len(plaintext)} bytes")
+        return plaintext
+    except Exception as e:
+        logger.error(f"Decryption failed: {e}")
+        return None
+
 
 def on_message(client, userdata, msg):
     """MQTT message callback - main processing logic"""
@@ -151,19 +202,33 @@ def on_message(client, userdata, msg):
             try:
                 envelope = mqtt_pb2.ServiceEnvelope()
                 envelope.ParseFromString(msg.payload)
+
+                node_id = _get_node_id_from_packet(envelope.packet)
+
+                port = getattr(envelope.packet.decoded, 'portnum', 0)
                 
-                node_id = f"!{envelope.packet.from_:08x}" if envelope.packet.from_ else None
-                
-                if envelope.packet.decoded.portnum == portnums_pb2.PortNum.TEXT_MESSAGE_APP:
-                    text_payload = envelope.packet.decoded.payload.decode('utf-8')
-                    logger.debug(f"Decoded protobuf text from {node_id}: {text_payload[:100]}")
-                    
-                    if text_payload.strip().startswith('{'):
-                        sensor_data = json.loads(text_payload)
-                else:
-                    logger.debug(f"Skipping non-text portnum: {envelope.packet.decoded.portnum}")
+                # Only process port 1 (TEXT_MESSAGE_APP) - our sensor data
+                if port != 1:
+                    logger.debug(f"Skipping non-sensor message; port={port}")
                     return
-                    
+                
+                # Port 1 messages should be plaintext JSON (MQTT encryption disabled)
+                payload_bytes = envelope.packet.decoded.payload
+                text_payload = None
+                
+                try:
+                    text_payload = payload_bytes.decode('utf-8', errors='ignore')
+                except Exception:
+                    logger.debug(f"Could not decode port 1 payload as UTF-8")
+                    return
+
+                if text_payload and text_payload.strip().startswith('{'):
+                    logger.debug(f"Decoded protobuf text from {node_id}: {text_payload[:100]}")
+                    sensor_data = json.loads(text_payload)
+                else:
+                    logger.debug(f"Port 1 payload is not JSON")
+                    return
+
             except Exception as e:
                 logger.error(f"Protobuf decode error: {e}")
                 return
@@ -186,23 +251,12 @@ def on_message(client, userdata, msg):
         
         logger.info(f"📊 Node {node_id}: AQI={aqi} ({category}), PM2.5={pm25} µg/m³")
         
-        # Prepare Timestream records
-        current_time = str(int(datetime.utcnow().timestamp() * 1000))
+        # Prepare InfluxDB point
+        timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
+        point = make_influx_point(node_id, timestamp_ms, sensor_data, aqi, category)
         
-        records = [
-            make_timestream_record(node_id, 'pm1', sensor_data['pm1'], current_time),
-            make_timestream_record(node_id, 'pm25', sensor_data['pm25'], current_time),
-            make_timestream_record(node_id, 'pm4', sensor_data['pm4'], current_time),
-            make_timestream_record(node_id, 'pm10', sensor_data['pm10'], current_time),
-            make_timestream_record(node_id, 'voc', sensor_data['voc'], current_time),
-            make_timestream_record(node_id, 'nox', sensor_data['nox'], current_time),
-            make_timestream_record(node_id, 'temp', sensor_data['t'], current_time),
-            make_timestream_record(node_id, 'humidity', sensor_data['rh'], current_time),
-            make_timestream_record(node_id, 'aqi', aqi, current_time),
-        ]
-        
-        # Write to Timestream
-        write_to_timestream(records)
+        # Write to InfluxDB
+        write_to_influxdb(point)
         
     except json.JSONDecodeError as e:
         logger.error(f"JSON decode error: {e}")
@@ -212,10 +266,11 @@ def on_message(client, userdata, msg):
 def main():
     """Main application loop"""
     logger.info("=" * 60)
-    logger.info("PulseAQI MQTT to Timestream Bridge Starting")
+    logger.info("PulseAQI MQTT to InfluxDB Bridge Starting")
     logger.info(f"MQTT Broker: {MQTT_BROKER}:{MQTT_PORT}")
     logger.info(f"MQTT Topic: {MQTT_TOPIC}")
-    logger.info(f"Timestream: {DATABASE_NAME}.{TABLE_NAME}")
+    logger.info(f"InfluxDB Bucket: {INFLUXDB_BUCKET}")
+    logger.info(f"InfluxDB Org: {INFLUXDB_ORG}")
     logger.info("=" * 60)
     
     # Create MQTT client

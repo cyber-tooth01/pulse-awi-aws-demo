@@ -4,10 +4,13 @@
     {
       "Effect": "Allow",
       "Action": [
-        "timestream:WriteRecords",
-        "timestream:DescribeEndpoints"
+        "dynamodb:PutItem",
+        "dynamodb:GetItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:DescribeTable"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:dynamodb:us-east-1:*:table/pulseaqi_sensor_data"
     },
     {
       "Effect": "Allow",
