@@ -104,28 +104,23 @@ def on_message(client, userdata, msg):
                 sender_id = f"!{from_id:08x}" if from_id else "unknown"
                 print(f"   Sender: {sender_id}")
                 
-                # Get port number (may not be accessible for encrypted messages)
-                port = getattr(envelope.packet.decoded, 'portnum', 0)
-                if port:
-                    print(f"   Port: {port}")
-
-                # Check if encrypted and decrypt if needed
-                payload_bytes = envelope.packet.decoded.payload
-                text_payload = None
-                is_encrypted = getattr(envelope.packet.decoded, 'encrypted', False)
-                
-                # If port is 0, assume encrypted even if flag not set
-                if is_encrypted or port == 0:
-                    print(f"   🔒 Encrypted payload - attempting decryption...")
-                    print(f"   PSK length: {len(MESHTASTIC_PSK)} bytes")
-                    decrypted = decrypt_payload(bytes(payload_bytes), MESHTASTIC_PSK)
-                    if decrypted:
-                        text_payload = decrypted.decode('utf-8', errors='ignore')
-                        print(f"   ✓ Decryption successful (decrypted {len(decrypted)} bytes)")
-                    else:
-                        print(f"   ✗ Decryption failed")
+                if envelope.packet.HasField("decoded"):
+                    pn = envelope.packet.decoded.portnum
+                    # Resolve port name
+                    port_map = {v: k for k, v in portnums_pb2.PortNum.__dict__.items() if isinstance(v, int)}
+                    port_label = port_map.get(pn, f"UNKNOWN({pn})")
+                    print(f"   Port: {port_label}")
                 else:
-                    text_payload = payload_bytes.decode('utf-8', errors='ignore')
+                    print("   Port: (encrypted or unknown)")
+
+                # Decode text payload for TEXT_MESSAGE_APP
+                text_payload = None
+                if envelope.packet.HasField("decoded") and envelope.packet.decoded.payload:
+                    payload_bytes = envelope.packet.decoded.payload
+                    try:
+                        text_payload = payload_bytes.decode('utf-8', errors='ignore')
+                    except Exception as e:
+                        print(f"   ✗ Text decode error: {e}")
 
                 if text_payload:
                     preview = (text_payload[:100] + '...') if len(text_payload) > 100 else text_payload
