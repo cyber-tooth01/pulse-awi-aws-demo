@@ -18,6 +18,8 @@ build/
 # Environment
 .env
 .env.local
+.env.example
+.env.influx.example
 
 # Logs
 *.log
