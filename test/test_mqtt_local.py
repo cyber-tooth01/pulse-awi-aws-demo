@@ -97,35 +97,59 @@ def on_message(client, userdata, msg):
                 envelope = mqtt_pb2.ServiceEnvelope()
                 envelope.ParseFromString(msg.payload)
 
-                # Support both 'from_' and 'from' attributes
-                from_id = getattr(envelope.packet, 'from_', None)
-                if not from_id:
-                    from_id = getattr(envelope.packet, 'from', None)
-                sender_id = f"!{from_id:08x}" if from_id else "unknown"
+                # Extract node ID - handle both 'from_' and 'from' attributes, including zero values
+                from_id = None
+                if hasattr(envelope.packet, 'from_'):
+                    from_id = envelope.packet.from_
+                elif hasattr(envelope.packet, 'from'):
+                    from_id = getattr(envelope.packet, 'from')
+                
+                sender_id = f"!{from_id:08x}" if from_id is not None else "unknown"
                 print(f"   Sender: {sender_id}")
                 
-                # Get port number (may not be accessible for encrypted messages)
-                port = getattr(envelope.packet.decoded, 'portnum', 0)
-                if port:
-                    print(f"   Port: {port}")
-
-                # Check if encrypted and decrypt if needed
+                # Check if message has decoded field (unencrypted) or encrypted field
+                if not envelope.packet.HasField('decoded'):
+                    print(f"   🔒 Encrypted message (no decoded field)")
+                    
+                    # Try to decrypt if we have encrypted data
+                    if envelope.packet.HasField('encrypted'):
+                        print(f"   Attempting decryption...")
+                        print(f"   PSK length: {len(MESHTASTIC_PSK)} bytes")
+                        decrypted = decrypt_payload(bytes(envelope.packet.encrypted), MESHTASTIC_PSK)
+                        if decrypted:
+                            text_payload = decrypted.decode('utf-8', errors='ignore')
+                            print(f"   ✓ Decryption successful (decrypted {len(decrypted)} bytes)")
+                            
+                            if text_payload.strip().startswith('{'):
+                                try:
+                                    sensor_data = json.loads(text_payload)
+                                    print(f"   📊 Decrypted Sensor Data:")
+                                    print(f"      PM2.5: {sensor_data.get('pm25')} µg/m³")
+                                    print(f"      PM10:  {sensor_data.get('pm10')} µg/m³")
+                                    print(f"      VOC:   {sensor_data.get('voc')}")
+                                    print(f"      NOx:   {sensor_data.get('nox')}")
+                                    print(f"      Temp:  {sensor_data.get('t')}°C")
+                                    print(f"      RH:    {sensor_data.get('rh')}%")
+                                except json.JSONDecodeError:
+                                    print(f"   Decrypted text: {text_payload[:100]}")
+                        else:
+                            print(f"   ✗ Decryption failed")
+                    return  # Skip further processing for encrypted messages
+                
+                # Message has decoded field - process it
+                port = envelope.packet.decoded.portnum
+                print(f"   Port: {port}")
+                
                 payload_bytes = envelope.packet.decoded.payload
                 text_payload = None
-                is_encrypted = getattr(envelope.packet.decoded, 'encrypted', False)
                 
-                # If port is 0, assume encrypted even if flag not set
-                if is_encrypted or port == 0:
-                    print(f"   🔒 Encrypted payload - attempting decryption...")
-                    print(f"   PSK length: {len(MESHTASTIC_PSK)} bytes")
-                    decrypted = decrypt_payload(bytes(payload_bytes), MESHTASTIC_PSK)
-                    if decrypted:
-                        text_payload = decrypted.decode('utf-8', errors='ignore')
-                        print(f"   ✓ Decryption successful (decrypted {len(decrypted)} bytes)")
-                    else:
-                        print(f"   ✗ Decryption failed")
-                else:
-                    text_payload = payload_bytes.decode('utf-8', errors='ignore')
+                # Decode as UTF-8 text
+                try:
+                    text_payload = payload_bytes.decode('utf-8', errors='strict')
+                except UnicodeDecodeError:
+                    print(f"   ⚠ Could not decode payload as UTF-8")
+                    print(f"   Hex dump (first 32 bytes): {payload_bytes[:32].hex()}")
+                    return
 
                 if text_payload:
                     preview = (text_payload[:100] + '...') if len(text_payload) > 100 else text_payload

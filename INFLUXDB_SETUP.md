@@ -75,10 +75,12 @@ Environment="INFLUXDB_URL=https://us-east-1-1.aws.cloud2.influxdata.com"
 ```bash
 # From local machine
 scp -i pulseaqi-demo-key.pem mqtt_bridge.py ubuntu@54.89.169.167:/opt/pulseaqi/
+scp -i pulseaqi-demo-key.pem requirements.txt ubuntu@54.89.169.167:/opt/pulseaqi/
 
 # On EC2
 ssh -i pulseaqi-demo-key.pem ubuntu@54.89.169.167
-sudo pip3 install influxdb-client
+sudo pip3 install -r /opt/pulseaqi/requirements.txt
+# This installs: influxdb-client, meshtastic (for protobuf decoding), paho-mqtt
 sudo systemctl daemon-reload
 sudo systemctl restart pulseaqi-mqtt
 sudo journalctl -u pulseaqi-mqtt -f

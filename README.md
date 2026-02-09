@@ -48,8 +48,14 @@ nano .env
 ### 2. Install Dependencies (Local Testing)
 
 ```bash
-pip install paho-mqtt boto3
+# Install all dependencies including protobuf support
+pip install -r requirements.txt
+
+# Or install individually
+pip install paho-mqtt influxdb-client meshtastic
 ```
+
+**Note**: The `meshtastic` package is required for decoding protobuf messages from nRF52-based sensor nodes.
 
 ### 3. Test MQTT Connection
 
@@ -112,10 +118,13 @@ pulse-awi-aws-demo/
 ├── .env.example                # Environment variables template
 ├── .gitignore                  # Git ignore rules
 ├── test/
-│   ├── test_mqtt_local.py      # Local MQTT testing
-│   └── test_timestream_query.py # Timestream query testing
+│   ├── test_mqtt_local.py          # Local MQTT testing
+│   ├── test_protobuf_decode.py     # Protobuf decoding unit tests
+│   ├── test_mqtt_bridge_integration.py # Integration tests
+│   └── test_timestream_query.py    # Timestream query testing
 ├── .github/
-│   └── copilot-instructions.md # AI agent guidance
+│   └── copilot-instructions.md     # AI agent guidance
+├── PROTOBUF_GUIDE.md               # Meshtastic protobuf decoding guide
 └── # PulseAQI AWS Demo Setup Guide.md  # Detailed setup guide
 ```
 
@@ -123,14 +132,21 @@ pulse-awi-aws-demo/
 
 - **EPA-Standard AQI Calculation**: Accurate PM2.5-based Air Quality Index
 - **Multi-Node Support**: Monitor multiple sensors simultaneously
+- **Protobuf Decoding**: Native support for Meshtastic binary messages (nRF52 nodes)
 - **Real-time Updates**: 10-second refresh in Grafana
 - **Cost Optimized**: 7-day data retention, minimal query overhead
 - **Auto-Recovery**: Systemd service with automatic restart
 - **Comprehensive Logging**: CloudWatch and local logs for debugging
 
-## Sensor Data Format
+## Message Formats
 
-Expected MQTT payload structure:
+The system supports both JSON and Protobuf message formats:
+
+### Protobuf Format (nRF52 nodes)
+Binary Meshtastic ServiceEnvelope with TEXT_MESSAGE_APP (port 1) containing JSON sensor data.
+See [PROTOBUF_GUIDE.md](PROTOBUF_GUIDE.md) for detailed decoding information.
+
+### JSON Format (legacy)
 ```json
 {
   "sender": "!e70287b5",
@@ -233,6 +249,7 @@ aws iam delete-role --role-name pulseaqi-ec2-role
 
 ## Resources
 
+- **Meshtastic Protobuf Decoding**: [PROTOBUF_GUIDE.md](PROTOBUF_GUIDE.md) - Detailed guide for protobuf message decoding
 - **Meshtastic MQTT**: https://meshtastic.org/docs/software/mqtt/
 - **AWS Timestream**: https://docs.aws.amazon.com/timestream/
 - **Grafana Timestream Plugin**: https://grafana.com/grafana/plugins/grafana-timestream-datasource/
