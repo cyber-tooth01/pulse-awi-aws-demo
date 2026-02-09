@@ -256,6 +256,9 @@ pip install meshtastic>=2.2.0
 meshtastic --ch-set name pulse-aqi --ch-index 0
 
 # Disable encryption (use default PSK)
+# ⚠️ SECURITY WARNING: This makes all mesh communications publicly readable!
+# Only use for non-sensitive environmental sensor data.
+# For private data, use a strong custom PSK instead.
 meshtastic --ch-set psk base64:Sw== --ch-index 0
 
 # Set uplink/downlink

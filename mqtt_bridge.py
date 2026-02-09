@@ -33,7 +33,9 @@ except ImportError:
     logger.warning("meshtastic package not installed - protobuf decoding disabled")
     PROTOBUF_AVAILABLE = False
 
-TEXT_PORTNUM = int(portnums_pb2.PortNum.TEXT_MESSAGE_APP) if PROTOBUF_AVAILABLE else 1
+# TEXT_MESSAGE_APP port number (used for sensor JSON messages)
+TEXT_MESSAGE_APP_PORT = 1
+TEXT_PORTNUM = int(portnums_pb2.PortNum.TEXT_MESSAGE_APP) if PROTOBUF_AVAILABLE else TEXT_MESSAGE_APP_PORT
 
 # Configuration
 MQTT_BROKER = "mqtt.meshtastic.org"

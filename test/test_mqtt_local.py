@@ -117,6 +117,7 @@ def on_message(client, userdata, msg):
                         print(f"   PSK length: {len(MESHTASTIC_PSK)} bytes")
                         decrypted = decrypt_payload(bytes(envelope.packet.encrypted), MESHTASTIC_PSK)
                         if decrypted:
+                            # Use errors='ignore' for decrypted data as it may have padding/noise
                             text_payload = decrypted.decode('utf-8', errors='ignore')
                             print(f"   ✓ Decryption successful (decrypted {len(decrypted)} bytes)")
                             
@@ -134,7 +135,9 @@ def on_message(client, userdata, msg):
                                     print(f"   Decrypted text: {text_payload[:100]}")
                         else:
                             print(f"   ✗ Decryption failed")
-                    return  # Skip further processing for encrypted messages
+                    # Skip further processing for encrypted messages
+                    print()
+                    return
                 
                 # Message has decoded field - process it
                 port = envelope.packet.decoded.portnum
