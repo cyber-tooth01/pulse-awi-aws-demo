@@ -134,14 +134,20 @@ def _get_node_id_from_packet(packet):
     """Return Meshtastic node id string from a protobuf packet, handling field name variants."""
     fid = None
     try:
-        # Some protobuf builds expose 'from_' while others use 'from'
-        if hasattr(packet, 'from_') and packet.from_:
+        # The 'from' field is a reserved Python keyword, so protobuf may expose it as 'from_'
+        # Try both variants and accept any non-None value (including 0)
+        if hasattr(packet, 'from_'):
             fid = packet.from_
-        elif hasattr(packet, 'from') and getattr(packet, 'from'):
+        elif hasattr(packet, 'from'):
             fid = getattr(packet, 'from')
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Could not extract node ID from packet: {e}")
         fid = None
-    return f"!{fid:08x}" if fid else None
+    
+    # Return formatted node ID if we got a valid value (including 0)
+    if fid is not None:
+        return f"!{fid:08x}"
+    return None
 
 
 def on_message(client, userdata, msg):
@@ -174,35 +180,57 @@ def on_message(client, userdata, msg):
             try:
                 envelope = mqtt_pb2.ServiceEnvelope()
                 envelope.ParseFromString(msg.payload)
+                
+                logger.debug(f"✓ Parsed protobuf ServiceEnvelope ({len(msg.payload)} bytes)")
 
+                # Extract node ID from packet
                 node_id = _get_node_id_from_packet(envelope.packet)
+                if not node_id:
+                    logger.warning("Could not extract node_id from protobuf packet")
+                    return
 
-                port = getattr(envelope.packet.decoded, 'portnum', 0)
+                # Check if packet has decoded data (not encrypted)
+                if not envelope.packet.HasField('decoded'):
+                    logger.debug(f"Skipping encrypted packet from {node_id} (no decoded field)")
+                    return
 
-                # Only process TEXT_MESSAGE_APP - our sensor JSON
+                port = envelope.packet.decoded.portnum
+                logger.debug(f"Protobuf message from {node_id}, port={port} (expecting {TEXT_PORTNUM})")
+
+                # Only process TEXT_MESSAGE_APP (port 1) - our sensor JSON
                 if port != TEXT_PORTNUM:
-                    logger.debug(f"Skipping non-sensor message; port={port}")
+                    logger.debug(f"Skipping non-TEXT port {port} from {node_id}")
                     return
                 
-                # Port 1 messages should be plaintext JSON (MQTT encryption disabled)
+                # Port 1 messages should be plaintext JSON (encryption disabled on mesh)
                 payload_bytes = envelope.packet.decoded.payload
-                text_payload = None
+                
+                if not payload_bytes:
+                    logger.debug(f"Empty payload in port {port} message from {node_id}")
+                    return
                 
                 try:
-                    text_payload = payload_bytes.decode('utf-8', errors='ignore')
-                except Exception:
-                    logger.debug(f"Could not decode port 1 payload as UTF-8")
+                    text_payload = payload_bytes.decode('utf-8', errors='strict')
+                except UnicodeDecodeError as e:
+                    logger.warning(f"UTF-8 decode error for port {port} from {node_id}: {e}")
                     return
 
-                if text_payload and text_payload.strip().startswith('{'):
-                    logger.debug(f"Decoded protobuf text from {node_id}: {text_payload[:100]}")
-                    sensor_data = json.loads(text_payload)
+                logger.debug(f"Decoded port {port} text from {node_id}: {text_payload[:150]}")
+                
+                # Validate it's JSON sensor data
+                if text_payload.strip().startswith('{'):
+                    try:
+                        sensor_data = json.loads(text_payload)
+                        logger.info(f"✓ Parsed sensor JSON from protobuf (node {node_id})")
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Invalid JSON in port {port} from {node_id}: {e}")
+                        return
                 else:
-                    logger.debug(f"Port 1 payload is not JSON")
+                    logger.debug(f"Port {port} payload from {node_id} is not JSON: {text_payload[:50]}")
                     return
 
             except Exception as e:
-                logger.error(f"Protobuf decode error: {e}")
+                logger.error(f"Protobuf decode error: {e}", exc_info=True)
                 return
         
         # Validate we got the data we need
