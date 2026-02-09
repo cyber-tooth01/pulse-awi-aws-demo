@@ -33,6 +33,8 @@ except ImportError:
     logger.warning("meshtastic package not installed - protobuf decoding disabled")
     PROTOBUF_AVAILABLE = False
 
+TEXT_PORTNUM = int(portnums_pb2.PortNum.TEXT_MESSAGE_APP) if PROTOBUF_AVAILABLE else 1
+
 # Configuration
 MQTT_BROKER = "mqtt.meshtastic.org"
 MQTT_PORT = 1883
@@ -142,36 +144,6 @@ def _get_node_id_from_packet(packet):
     return f"!{fid:08x}" if fid else None
 
 
-def _decrypt_payload(encrypted_bytes, psk):
-    """
-    Decrypt Meshtastic encrypted payload using AES-128-CTR with PSK as key.
-    Returns decrypted bytes or None on failure.
-    """
-    try:
-        # Meshtastic uses first 4 bytes as nonce, rest as ciphertext
-        if len(encrypted_bytes) < 4:
-            logger.debug("Encrypted payload too short")
-            return None
-        
-        nonce = encrypted_bytes[:4]
-        ciphertext = encrypted_bytes[4:]
-        
-        # Construct 16-byte IV: nonce (4 bytes) + zeros (12 bytes)
-        iv = nonce + b'\x00' * 12
-        
-        # Pad PSK to 16 bytes if needed
-        key = psk if len(psk) >= 16 else psk + b'\x00' * (16 - len(psk))
-        
-        cipher = AES.new(key[:16], AES.MODE_CTR, nonce=iv[:12])
-        plaintext = cipher.decrypt(ciphertext)
-        
-        logger.debug(f"Decrypted {len(ciphertext)} bytes → {len(plaintext)} bytes")
-        return plaintext
-    except Exception as e:
-        logger.error(f"Decryption failed: {e}")
-        return None
-
-
 def on_message(client, userdata, msg):
     """MQTT message callback - main processing logic"""
     try:
@@ -206,9 +178,9 @@ def on_message(client, userdata, msg):
                 node_id = _get_node_id_from_packet(envelope.packet)
 
                 port = getattr(envelope.packet.decoded, 'portnum', 0)
-                
-                # Only process port 1 (TEXT_MESSAGE_APP) - our sensor data
-                if port != 1:
+
+                # Only process TEXT_MESSAGE_APP - our sensor JSON
+                if port != TEXT_PORTNUM:
                     logger.debug(f"Skipping non-sensor message; port={port}")
                     return
                 
