@@ -127,7 +127,7 @@ def test_port_numbers():
     
     port_tests = [
         (portnums_pb2.PortNum.TEXT_MESSAGE_APP, "TEXT_MESSAGE_APP", True),
-        (portnums_pb2.PortNum.TELEMETRY_APP, "TELEMETRY_APP", False),
+        (portnums_pb2.PortNum.TELEMETRY_APP, "TELEMETRY_APP", True),  # Now supported
         (portnums_pb2.PortNum.POSITION_APP, "POSITION_APP", False),
         (portnums_pb2.PortNum.UNKNOWN_APP, "UNKNOWN_APP", False),
     ]
@@ -139,10 +139,11 @@ def test_port_numbers():
         envelope.packet.decoded.portnum = port_num
         envelope.packet.decoded.payload = b'{"test": "data"}'
         
-        # Check if we should process this port
-        is_text_port = (port_num == portnums_pb2.PortNum.TEXT_MESSAGE_APP)
+        # Check if we should process this port (TEXT or TELEMETRY)
+        is_supported_port = (port_num == portnums_pb2.PortNum.TEXT_MESSAGE_APP or 
+                            port_num == portnums_pb2.PortNum.TELEMETRY_APP)
         
-        status = "✓" if is_text_port == should_process else "✗"
+        status = "✓" if is_supported_port == should_process else "✗"
         action = "PROCESS" if should_process else "SKIP"
         print(f"{status} Port {port_num} ({port_name:25s}) -> {action}")
     
@@ -211,11 +212,73 @@ def test_encrypted_vs_unencrypted():
     
     print()
 
+def test_telemetry_decoding():
+    """Test Port 67 telemetry message decoding"""
+    print("=" * 60)
+    print("TEST 6: Telemetry (Port 67) Decoding")
+    print("=" * 60)
+    
+    from meshtastic.protobuf import telemetry_pb2
+    
+    # Create telemetry with air quality data
+    telemetry = telemetry_pb2.Telemetry()
+    telemetry.air_quality_metrics.pm10_standard = 3
+    telemetry.air_quality_metrics.pm25_standard = 45
+    telemetry.air_quality_metrics.pm40_standard = 5
+    telemetry.air_quality_metrics.pm100_standard = 50
+    telemetry.air_quality_metrics.pm_voc_idx = 103
+    telemetry.air_quality_metrics.pm_nox_idx = 1
+    telemetry.air_quality_metrics.pm_temperature = 24.7
+    telemetry.air_quality_metrics.pm_humidity = 63.8
+    
+    # Create envelope with telemetry
+    envelope = mqtt_pb2.ServiceEnvelope()
+    envelope.packet.CopyFrom(mesh_pb2.MeshPacket())
+    setattr(envelope.packet, 'from', 0xe70287b5)
+    envelope.packet.to = 0xffffffff
+    envelope.packet.decoded.portnum = portnums_pb2.PortNum.TELEMETRY_APP
+    envelope.packet.decoded.payload = telemetry.SerializeToString()
+    
+    # Serialize and deserialize
+    serialized = envelope.SerializeToString()
+    print(f"✓ Created telemetry message: {len(serialized)} bytes")
+    
+    envelope2 = mqtt_pb2.ServiceEnvelope()
+    envelope2.ParseFromString(serialized)
+    
+    # Decode telemetry
+    telemetry2 = telemetry_pb2.Telemetry()
+    telemetry2.ParseFromString(envelope2.packet.decoded.payload)
+    
+    if telemetry2.HasField('air_quality_metrics'):
+        aq = telemetry2.air_quality_metrics
+        print(f"✓ Decoded air quality telemetry:")
+        print(f"  PM1.0: {aq.pm10_standard}")
+        print(f"  PM2.5: {aq.pm25_standard}")
+        print(f"  PM4.0: {aq.pm40_standard}")
+        print(f"  PM10:  {aq.pm100_standard}")
+        print(f"  VOC:   {aq.pm_voc_idx}")
+        print(f"  NOx:   {aq.pm_nox_idx}")
+        print(f"  Temp:  {aq.pm_temperature:.1f}°C")
+        print(f"  RH:    {aq.pm_humidity:.1f}%")
+        
+        # Validate values match
+        if (aq.pm25_standard == 45 and aq.pm100_standard == 50 and 
+            aq.pm_voc_idx == 103 and aq.pm_nox_idx == 1):
+            print("✓ All values validated correctly")
+        else:
+            print("✗ Value validation failed")
+    else:
+        print("✗ No air quality metrics found")
+    
+    print()
+
 def main():
     """Run all tests"""
     print("\nMeshtastic Protobuf Decoding Tests")
     print("=" * 60)
     print(f"TEXT_MESSAGE_APP port = {portnums_pb2.PortNum.TEXT_MESSAGE_APP}")
+    print(f"TELEMETRY_APP port = {portnums_pb2.PortNum.TELEMETRY_APP}")
     print()
     
     try:
@@ -224,6 +287,7 @@ def main():
         test_port_numbers()
         test_malformed_payloads()
         test_encrypted_vs_unencrypted()
+        test_telemetry_decoding()
         
         print("=" * 60)
         print("All tests completed successfully!")

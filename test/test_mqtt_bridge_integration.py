@@ -130,14 +130,14 @@ def test_protobuf_message_parsing():
         return False
 
 def test_different_port_numbers():
-    """Test that non-TEXT messages are skipped"""
+    """Test that TEXT and TELEMETRY messages are processed, others skipped"""
     print("\n" + "=" * 60)
     print("Integration Test: Port Number Filtering")
     print("=" * 60)
     
     test_cases = [
         (portnums_pb2.PortNum.TEXT_MESSAGE_APP, True, "TEXT_MESSAGE_APP"),
-        (portnums_pb2.PortNum.TELEMETRY_APP, False, "TELEMETRY_APP"),
+        (portnums_pb2.PortNum.TELEMETRY_APP, True, "TELEMETRY_APP"),  # Now supported
         (portnums_pb2.PortNum.POSITION_APP, False, "POSITION_APP"),
     ]
     
@@ -148,13 +148,110 @@ def test_different_port_numbers():
         envelope.ParseFromString(serialized)
         
         port = envelope.packet.decoded.portnum
-        is_text_port = (port == portnums_pb2.PortNum.TEXT_MESSAGE_APP)
+        is_supported_port = (port == portnums_pb2.PortNum.TEXT_MESSAGE_APP or 
+                            port == portnums_pb2.PortNum.TELEMETRY_APP)
         
-        status = "✓" if is_text_port == should_process else "✗"
+        status = "✓" if is_supported_port == should_process else "✗"
         action = "PROCESS" if should_process else "SKIP"
         print(f"{status} Port {port} ({port_name:25s}) -> {action}")
     
     print()
+
+def test_telemetry_message_processing():
+    """Test that Port 67 telemetry messages with air quality data are processed"""
+    print("=" * 60)
+    print("Integration Test: Telemetry Message Processing")
+    print("=" * 60)
+    
+    try:
+        from meshtastic.protobuf import telemetry_pb2
+        
+        # Create telemetry with air quality data
+        telemetry = telemetry_pb2.Telemetry()
+        telemetry.air_quality_metrics.pm10_standard = 3
+        telemetry.air_quality_metrics.pm25_standard = 45
+        telemetry.air_quality_metrics.pm40_standard = 5
+        telemetry.air_quality_metrics.pm100_standard = 50
+        telemetry.air_quality_metrics.pm_voc_idx = 103
+        telemetry.air_quality_metrics.pm_nox_idx = 1
+        telemetry.air_quality_metrics.pm_temperature = 24.7
+        telemetry.air_quality_metrics.pm_humidity = 63.8
+        
+        # Create envelope with telemetry
+        envelope = mqtt_pb2.ServiceEnvelope()
+        envelope.packet.CopyFrom(mesh_pb2.MeshPacket())
+        setattr(envelope.packet, 'from', 0xe70287b5)
+        envelope.packet.to = 0xffffffff
+        envelope.packet.decoded.portnum = portnums_pb2.PortNum.TELEMETRY_APP
+        envelope.packet.decoded.payload = telemetry.SerializeToString()
+        
+        serialized = envelope.SerializeToString()
+        print(f"✓ Created telemetry protobuf message ({len(serialized)} bytes)")
+        
+        # Parse it back
+        envelope2 = mqtt_pb2.ServiceEnvelope()
+        envelope2.ParseFromString(serialized)
+        print("✓ Parsed ServiceEnvelope")
+        
+        # Extract node ID
+        from_id = getattr(envelope2.packet, 'from', None)
+        node_id = f"!{from_id:08x}" if from_id is not None else None
+        print(f"✓ Extracted node ID: {node_id}")
+        
+        # Check port
+        port = envelope2.packet.decoded.portnum
+        print(f"✓ Port number: {port} (TELEMETRY_APP)")
+        
+        if port != portnums_pb2.PortNum.TELEMETRY_APP:
+            print(f"✗ FAILED: Expected port {portnums_pb2.PortNum.TELEMETRY_APP}, got {port}")
+            return False
+        
+        # Decode telemetry
+        telemetry2 = telemetry_pb2.Telemetry()
+        telemetry2.ParseFromString(envelope2.packet.decoded.payload)
+        
+        if not telemetry2.HasField('air_quality_metrics'):
+            print("✗ FAILED: No air quality metrics found")
+            return False
+        
+        print("✓ Has air quality metrics")
+        
+        aq = telemetry2.air_quality_metrics
+        
+        # Validate values can be converted to sensor_data format
+        sensor_data = {
+            'pm1': aq.pm10_standard,
+            'pm25': aq.pm25_standard,
+            'pm4': aq.pm40_standard,
+            'pm10': aq.pm100_standard,
+            'voc': aq.pm_voc_idx,
+            'nox': aq.pm_nox_idx,
+            't': aq.pm_temperature,
+            'rh': aq.pm_humidity
+        }
+        
+        print(f"✓ Converted to sensor_data format: {len(sensor_data)} fields")
+        print(f"✓ PM2.5: {sensor_data['pm25']} µg/m³")
+        print(f"✓ PM10: {sensor_data['pm10']} µg/m³")
+        
+        # Validate required fields
+        required_fields = ['pm1', 'pm25', 'pm4', 'pm10', 'voc', 'nox', 't', 'rh']
+        missing_fields = [f for f in required_fields if f not in sensor_data]
+        
+        if missing_fields:
+            print(f"✗ FAILED: Missing required fields: {missing_fields}")
+            return False
+        
+        print(f"✓ All required fields present")
+        
+        print("\n✓ Telemetry integration test PASSED")
+        return True
+        
+    except Exception as e:
+        print(f"✗ FAILED with error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 def test_encrypted_messages():
     """Test that encrypted messages are skipped"""
@@ -196,6 +293,7 @@ def main():
         
         success = test_protobuf_message_parsing() and success
         test_different_port_numbers()
+        success = test_telemetry_message_processing() and success
         success = test_encrypted_messages() and success
         
         if success:

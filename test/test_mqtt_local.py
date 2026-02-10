@@ -144,34 +144,75 @@ def on_message(client, userdata, msg):
                 print(f"   Port: {port}")
                 
                 payload_bytes = envelope.packet.decoded.payload
-                text_payload = None
                 
-                # Decode as UTF-8 text
-                try:
-                    text_payload = payload_bytes.decode('utf-8', errors='strict')
-                except UnicodeDecodeError:
-                    print(f"   ⚠ Could not decode payload as UTF-8")
-                    print(f"   Hex dump (first 32 bytes): {payload_bytes[:32].hex()}")
-                    return
+                # Handle different port types
+                if port == portnums_pb2.PortNum.TEXT_MESSAGE_APP:
+                    # Port 1: TEXT_MESSAGE_APP - JSON text
+                    text_payload = None
+                    
+                    # Decode as UTF-8 text
+                    try:
+                        text_payload = payload_bytes.decode('utf-8', errors='strict')
+                    except UnicodeDecodeError:
+                        print(f"   ⚠ Could not decode payload as UTF-8")
+                        print(f"   Hex dump (first 32 bytes): {payload_bytes[:32].hex()}")
+                        return
 
-                if text_payload:
-                    preview = (text_payload[:100] + '...') if len(text_payload) > 100 else text_payload
-                    print(f"   Text payload: {preview}")
+                    if text_payload:
+                        preview = (text_payload[:100] + '...') if len(text_payload) > 100 else text_payload
+                        print(f"   Text payload: {preview}")
 
-                    if text_payload.strip().startswith('{'):
-                        try:
-                            sensor_data = json.loads(text_payload)
-                            print(f"   📊 Sensor Data:")
-                            print(f"      PM2.5: {sensor_data.get('pm25')} µg/m³")
-                            print(f"      PM10:  {sensor_data.get('pm10')} µg/m³")
-                            print(f"      VOC:   {sensor_data.get('voc')}")
-                            print(f"      NOx:   {sensor_data.get('nox')}")
-                            print(f"      Temp:  {sensor_data.get('t')}°C")
-                            print(f"      RH:    {sensor_data.get('rh')}%")
-                        except json.JSONDecodeError as e:
-                            print(f"   ⚠ Text looks like JSON but failed to parse: {e}")
+                        if text_payload.strip().startswith('{'):
+                            try:
+                                sensor_data = json.loads(text_payload)
+                                print(f"   📊 Sensor Data (from JSON):")
+                                print(f"      PM2.5: {sensor_data.get('pm25')} µg/m³")
+                                print(f"      PM10:  {sensor_data.get('pm10')} µg/m³")
+                                print(f"      VOC:   {sensor_data.get('voc')}")
+                                print(f"      NOx:   {sensor_data.get('nox')}")
+                                print(f"      Temp:  {sensor_data.get('t')}°C")
+                                print(f"      RH:    {sensor_data.get('rh')}%")
+                            except json.JSONDecodeError as e:
+                                print(f"   ⚠ Text looks like JSON but failed to parse: {e}")
+                    else:
+                        print("   ⚠ No text payload present in protobuf message")
+                
+                elif port == portnums_pb2.PortNum.TELEMETRY_APP:
+                    # Port 67: TELEMETRY_APP - Binary protobuf telemetry
+                    try:
+                        telemetry = telemetry_pb2.Telemetry()
+                        telemetry.ParseFromString(payload_bytes)
+                        
+                        if telemetry.HasField('air_quality_metrics'):
+                            aq = telemetry.air_quality_metrics
+                            print(f"   📊 Air Quality Telemetry:")
+                            print(f"      PM1.0:       {aq.pm10_standard} µg/m³")
+                            print(f"      PM2.5:       {aq.pm25_standard} µg/m³")
+                            print(f"      PM4.0:       {aq.pm40_standard} µg/m³")
+                            print(f"      PM10:        {aq.pm100_standard} µg/m³")
+                            print(f"      VOC Index:   {aq.pm_voc_idx}")
+                            print(f"      NOx Index:   {aq.pm_nox_idx}")
+                            print(f"      Temp:        {aq.pm_temperature}°C")
+                            print(f"      Humidity:    {aq.pm_humidity}%")
+                        else:
+                            print(f"   ℹ Telemetry type: {telemetry.WhichOneof('variant')}")
+                            if telemetry.HasField('device_metrics'):
+                                dm = telemetry.device_metrics
+                                print(f"      Battery: {dm.battery_level}%")
+                                print(f"      Voltage: {dm.voltage}V")
+                            elif telemetry.HasField('environment_metrics'):
+                                em = telemetry.environment_metrics
+                                print(f"      Temperature: {em.temperature}°C")
+                                print(f"      Humidity: {em.relative_humidity}%")
+                                print(f"      Pressure: {em.barometric_pressure} hPa")
+                    except Exception as e:
+                        print(f"   ⚠ Could not decode telemetry: {e}")
+                        print(f"   Hex dump (first 32 bytes): {payload_bytes[:32].hex()}")
+                
                 else:
-                    print("   ⚠ No text payload present in protobuf message")
+                    # Other port types
+                    print(f"   ℹ Unsupported port type {port}")
+                    print(f"   Hex dump (first 32 bytes): {payload_bytes[:32].hex()}")
 
             except Exception as e:
                 print(f"   ✗ Protobuf decode error: {e}")

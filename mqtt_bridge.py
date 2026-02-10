@@ -27,15 +27,17 @@ logger = logging.getLogger(__name__)
 
 # Try importing Meshtastic protobuf support (optional)
 try:
-    from meshtastic.protobuf import mqtt_pb2, portnums_pb2
+    from meshtastic.protobuf import mqtt_pb2, portnums_pb2, telemetry_pb2
     PROTOBUF_AVAILABLE = True
 except ImportError:
     logger.warning("meshtastic package not installed - protobuf decoding disabled")
     PROTOBUF_AVAILABLE = False
 
-# TEXT_MESSAGE_APP port number (used for sensor JSON messages)
+# Port numbers for supported message types
 TEXT_MESSAGE_APP_PORT = 1
+TELEMETRY_APP_PORT = 67
 TEXT_PORTNUM = int(portnums_pb2.PortNum.TEXT_MESSAGE_APP) if PROTOBUF_AVAILABLE else TEXT_MESSAGE_APP_PORT
+TELEMETRY_PORTNUM = int(portnums_pb2.PortNum.TELEMETRY_APP) if PROTOBUF_AVAILABLE else TELEMETRY_APP_PORT
 
 # Configuration
 MQTT_BROKER = "mqtt.meshtastic.org"
@@ -151,6 +153,42 @@ def _get_node_id_from_packet(packet):
         return f"!{fid:08x}"
     return None
 
+def _decode_telemetry_to_sensor_data(payload_bytes):
+    """
+    Decode Port 67 (TELEMETRY_APP) protobuf payload to sensor_data dict.
+    Returns dict with pm1, pm25, pm4, pm10, voc, nox, t, rh or None if not air quality data.
+    """
+    try:
+        telemetry = telemetry_pb2.Telemetry()
+        telemetry.ParseFromString(payload_bytes)
+        
+        # Check if this is air quality telemetry
+        if not telemetry.HasField('air_quality_metrics'):
+            logger.debug("Telemetry message does not contain air_quality_metrics")
+            return None
+        
+        aq = telemetry.air_quality_metrics
+        
+        # Map telemetry fields to our sensor_data format
+        # Using standard values (not environmental) for PM readings
+        sensor_data = {
+            'pm1': aq.pm10_standard if aq.pm10_standard > 0 else 0,  # PM1.0
+            'pm25': aq.pm25_standard if aq.pm25_standard > 0 else 0,  # PM2.5
+            'pm4': aq.pm40_standard if aq.pm40_standard > 0 else 0,  # PM4.0
+            'pm10': aq.pm100_standard if aq.pm100_standard > 0 else 0,  # PM10
+            'voc': aq.pm_voc_idx if aq.pm_voc_idx > 0 else 0,  # VOC index
+            'nox': aq.pm_nox_idx if aq.pm_nox_idx > 0 else 0,  # NOx index
+            't': aq.pm_temperature if aq.pm_temperature != 0 else 0,  # Temperature
+            'rh': aq.pm_humidity if aq.pm_humidity != 0 else 0  # Humidity
+        }
+        
+        logger.debug(f"Decoded air quality telemetry: PM2.5={sensor_data['pm25']}, PM10={sensor_data['pm10']}")
+        return sensor_data
+        
+    except Exception as e:
+        logger.error(f"Error decoding telemetry payload: {e}")
+        return None
+
 
 def on_message(client, userdata, msg):
     """MQTT message callback - main processing logic"""
@@ -197,38 +235,54 @@ def on_message(client, userdata, msg):
                     return
 
                 port = envelope.packet.decoded.portnum
-                logger.debug(f"Protobuf message from {node_id}, port={port} (expecting {TEXT_PORTNUM})")
+                logger.debug(f"Protobuf message from {node_id}, port={port}")
 
-                # Only process TEXT_MESSAGE_APP (port 1) - our sensor JSON
-                if port != TEXT_PORTNUM:
-                    logger.debug(f"Skipping non-TEXT port {port} from {node_id}")
-                    return
-                
-                # Port 1 messages should be plaintext JSON (encryption disabled on mesh)
+                # Get payload bytes
                 payload_bytes = envelope.packet.decoded.payload
                 
                 if not payload_bytes:
                     logger.debug(f"Empty payload in port {port} message from {node_id}")
                     return
                 
-                try:
-                    text_payload = payload_bytes.decode('utf-8', errors='strict')
-                except UnicodeDecodeError as e:
-                    logger.warning(f"UTF-8 decode error for port {port} from {node_id}: {e}")
-                    return
-
-                logger.debug(f"Decoded port {port} text from {node_id}: {text_payload[:150]}")
-                
-                # Validate it's JSON sensor data
-                if text_payload.strip().startswith('{'):
+                # Process based on port number
+                if port == TEXT_PORTNUM:
+                    # Port 1: TEXT_MESSAGE_APP - JSON sensor data
+                    logger.debug(f"Processing TEXT_MESSAGE_APP (port 1) from {node_id}")
+                    
                     try:
-                        sensor_data = json.loads(text_payload)
-                        logger.info(f"✓ Parsed sensor JSON from protobuf (node {node_id})")
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON in port {port} from {node_id}: {e}")
+                        text_payload = payload_bytes.decode('utf-8', errors='strict')
+                    except UnicodeDecodeError as e:
+                        logger.warning(f"UTF-8 decode error for port {port} from {node_id}: {e}")
                         return
+
+                    logger.debug(f"Decoded port {port} text from {node_id}: {text_payload[:150]}")
+                    
+                    # Validate it's JSON sensor data
+                    if text_payload.strip().startswith('{'):
+                        try:
+                            sensor_data = json.loads(text_payload)
+                            logger.info(f"✓ Parsed sensor JSON from protobuf port 1 (node {node_id})")
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Invalid JSON in port {port} from {node_id}: {e}")
+                            return
+                    else:
+                        logger.debug(f"Port {port} payload from {node_id} is not JSON: {text_payload[:50]}")
+                        return
+                
+                elif port == TELEMETRY_PORTNUM:
+                    # Port 67: TELEMETRY_APP - Binary protobuf with air quality metrics
+                    logger.debug(f"Processing TELEMETRY_APP (port 67) from {node_id}")
+                    
+                    sensor_data = _decode_telemetry_to_sensor_data(payload_bytes)
+                    if not sensor_data:
+                        logger.debug(f"No air quality data in telemetry from {node_id}")
+                        return
+                    
+                    logger.info(f"✓ Parsed air quality telemetry from protobuf port 67 (node {node_id})")
+                
                 else:
-                    logger.debug(f"Port {port} payload from {node_id} is not JSON: {text_payload[:50]}")
+                    # Other ports - skip
+                    logger.debug(f"Skipping unsupported port {port} from {node_id}")
                     return
 
             except Exception as e:
